@@ -2,7 +2,7 @@
 /*
  * C Auxilary Preprocessor
  *
- * $Id: cap.c,v 1.60 2014/12/08 05:02:33 sjg Exp $
+ * $Id: cap.c,v 1.96 2014/12/11 09:33:11 sjg Exp $
  *
  * (c) Stephen Geary, Jan 2011
  *
@@ -39,7 +39,7 @@
 #include <errno.h>
 
 
-static char *cap_version = "$Revision: 1.60 $" ;
+static char *cap_version = "$Revision: 1.96 $" ;
 
 
 #define DEBUGVER
@@ -48,8 +48,8 @@ static char *cap_version = "$Revision: 1.60 $" ;
 
 #ifdef DEBUGVER
    volatile static int debugme = 0 ;
-#  define DBGLINEBASE() fprintf(stderr," Line %d " , __LINE__ )
-#  define DBGLINE() if( debugme != 0 ) { DBGLINEBASE() ; fputc( EOLOUT, stderr ) ; }
+#  define DBGLINEBASE() fprintf(stderr," Line % 5d  %20s " , __LINE__, __func__ )
+#  define DBGLINE() if( debugme != 0 ) { DBGLINEBASE() ; fputc( (int)'\n', stderr ) ; }
 #  define debugf(...)   { if( debugme != 0 ){  DBGLINEBASE() ; fprintf( stderr, __VA_ARGS__ ) ; } }
 #  define debug_on()    { debugme = 1 ; }
 #  define debug_off()   { debugme = 0 ; }
@@ -75,7 +75,26 @@ static char *cap_version = "$Revision: 1.60 $" ;
 
 #define toggle(b)   if( (b) == FALSE ){ (b) = TRUE ; }else{ (b) = FALSE ; }
 
+#define safe_free(ptr)  if( (ptr) != NULL ){ free(ptr) ; (ptr) = NULL ; }
 
+
+/* Sometime we want to apply a macro to open and close braces
+ * in statement blocks
+ *
+ * This mechanism is designed to do that.
+ */
+static char *open_brace_macro = NULL ;
+static char *close_brace_macro = NULL ;
+
+static int apply_brace_macros = FALSE ;
+
+static char *return_macro = NULL ;
+
+static int apply_return_macro = FALSE ;
+
+
+/* File streaming macros used mostly for brevity and consistency
+ */
 
 static FILE *fin = NULL ;
 static FILE *fout = NULL ;
@@ -84,7 +103,8 @@ static FILE *fout = NULL ;
 #define FCLOSE(fs) \
                     if( (fs) != NULL ) \
                     { \
-                        fclose( fs ) ; \
+                        fclose( (fs) ) ; \
+                        (fs) = NULL ; \
                     }
 
 #define FPUT(c)     fputc( (int)(c), fout )
@@ -96,7 +116,12 @@ static boolean skip_is_on = FALSE ;
 
 static boolean changes_made = FALSE ;
 
-static char macrochar = '#' ;
+#define DEFAULT_MACROCHAR '#'
+
+static char initial_macrochar = DEFAULT_MACROCHAR ;
+
+static char macrochar = DEFAULT_MACROCHAR ;
+
 
 
 #define BUFFLEN 1024
@@ -107,91 +132,82 @@ static char postbuff[BUFFLEN+1] ;
 
 static int lastchar = -1 ;
 
-#define OUTPUTBUFFS()   \
-            { \
-                if( prebuff[0] != '\0' ) \
-                    fputs( prebuff, fout ) ; \
-                if( buff[0] != '\0' ) \
-                    fputs( buff, fout ) ; \
-                if( postbuff[0] != '\0' ) \
-                    fputs( postbuff, fout ) ; \
-                if( lastchar != -1 ) \
-                    fputc( lastchar, fout ) ; \
-            }
-
-
-#define OUTPUTBUFFS_NOLASTCHAR()    \
-            { \
-                if( prebuff[0] != '\0' ) \
-                    fputs( prebuff, fout ) ; \
-                if( buff[0] != '\0' ) \
-                    fputs( buff, fout ) ; \
-                if( postbuff[0] != '\0' ) \
-                    fputs( postbuff, fout ) ; \
-            }
 
 #define OUTPUTBUFFS_GEN( p1, p2, p3, lc )   \
             { \
-                if( (p1) != '\0' ) \
-                    fputs( (p1), fout ) ; \
-                if( (p2) != '\0' ) \
-                    fputs( (p2), fout ) ; \
-                if( (p3) != '\0' ) \
-                    fputs( (p3), fout ) ; \
+                if( *(p1) != '\0' ) \
+                { \
+                    FPUTS( (p1) ) ; \
+                } \
+                if( *(p2) != '\0' ) \
+                { \
+                    FPUTS( (p2) ) ; \
+                } \
+                if( *(p3) != '\0' ) \
+                { \
+                    FPUTS( (p3) ) ; \
+                } \
                 if( (lc) != -1 ) \
-                    fputc( (lc), fout ) ; \
+                { \
+                    FPUT( (lc) ) ; \
+                } \
             }
+
+#define OUTPUTBUFFS()               OUTPUTBUFFS_GEN( prebuff, buff, postbuff, lastchar )
+
+#define OUTPUTBUFFS_NOLASTCHAR()    OUTPUTBUFFS_GEN( prebuff, buff, postbuff, -1 )
 
 
 
 #define iswhitespace(c)     ( ( (c) == ' ' ) || ( (c) == '\t' ) )
 
 
+/*******************************************************
+ */
 
 static int iskeyword( char *str )
 {
     int retv = 0 ;
     
-    debugf( "iskeyword [%s]\n", str ) ;
+    if( buff[0] != macrochar )
+        return 0 ;
     
-    retv = ( buff[0] == macrochar ) ;
+    /* need to avoid white spaces in comparisons
+     * as we'd like spacing to be legal
+     *
+     * We assume that "keyword" is space trimmed
+     * which it should be.
+     */
+    int i = 1 ;
+    int j = 0 ;
     
-    if( retv )
+    while( iswhitespace( buff[i] ) )
+        i++ ;
+    
+    while( buff[i] == str[j] )
     {
-        /* need to avoid white spaces in comparisons
-         * as we'd like spacing to be legal
-         *
-         * We assume that "keyword" is space trimmed
-         * which it should be.
-         */
-        int i = 1 ;
-        int j = 0 ;
+        if( str[j] == 0 )
+            break ;
         
-        while( iswhitespace( buff[i] ) )
-            i++ ;
-        
-        while( buff[i] == str[j] )
-        {
-            if( str[j] == 0 )
-                break ;
-            
-            i++ ;
-            j++ ;
-        };
-        
-        if( buff[i] == str[j] )
-        {
-            retv = 1 ;
-        }
-        else
-        {
-            retv = 0 ;
-        }
+        i++ ;
+        j++ ;
+    };
+    
+    if( buff[i] == str[j] )
+    {
+        retv = 1 ;
+    }
+    else
+    {
+        retv = 0 ;
     }
     
     return retv ;
 }
 
+
+/*******************************************************
+ */
 
 struct wordstack_s {
     struct wordstack_s  *next ;
@@ -209,6 +225,9 @@ typedef struct wordstack_s  wordstack_t ;
 static wordstack_t *wordstackp = NULL ;
 
 
+/*******************************************************
+ */
+
 
 /* copy the buffer str to the indicated buffer
  */
@@ -224,6 +243,9 @@ void copybuff( char *dest )
     while( ( i < BUFFLEN ) && ( buff[i] != '\0' ) ) ;
 }
 
+
+/*******************************************************
+ */
 
 
 /* read a symbol from the input stream returning it's
@@ -265,10 +287,138 @@ void pendchar( int c )
 }
 
 
+/*******************************************************
+ */
+
+static char deferredbuffer[BUFFLEN+1] ;
+
+static int deferredbufferindex = -1 ;
+
+
+static void append_to_deferredbuffer( char *buff )
+{
+    if( buff == NULL )
+        return ;
+        
+    if( buff[0] == 0 )
+        return ;
+
+    int i = 0 ;
+    
+    int j = deferredbufferindex ;
+    
+    if( j == -1 )
+    {
+        j = 0 ;
+    }
+    else
+    {
+        while( deferredbuffer[j] != 0 )
+            j++ ;
+    }
+
+    while( ( buff[i] != 0 ) && ( j < BUFFLEN ) )
+    {
+        deferredbuffer[j] = buff[i] ;
+        j++ ;
+        i++ ;
+    };
+    
+    deferredbuffer[j] = 0 ;
+    
+    if( deferredbufferindex == -1 )
+        deferredbufferindex = 0 ;
+}
+
+
+/*******************************************************
+ */
+
+int read_from_deferred_buffer()
+{
+    int retv = 0 ;
+    
+    if( deferredbufferindex == -1 )
+        return -1 ;
+
+    retv = (int)deferredbuffer[ deferredbufferindex ] ;
+    
+    deferredbufferindex++ ;
+    
+    if( deferredbuffer[ deferredbufferindex ] == 0 )
+    {
+        deferredbufferindex = -1 ;
+    }
+    
+    return retv ;
+}
+
+
+/*******************************************************
+ */
+
+static int in_comment = FALSE ;
+
+static int lastchar_read = -1 ;
+
+static int currentchar_read = -1 ;
+
+static int in_quotes = FALSE ;
+
+/* The rotatingbuffer simply stores the last BUFFLEN
+ * characters read by rotating the index value.  Note
+ * that cap can take input from stdin so we cannot
+ * assume that the source can be preloaded to a
+ * buffer or presume the ability to change file
+ * position.
+ *
+ * At ALL times rotatingbufferindex points to the NEXT
+ * character position to fill.
+ *
+ * It is initialized to ALL zeros.
+ *
+ * The extra character at the end of the buffer is NEVER
+ * accessed by code but is there as a guard in case
+ * the buffer is accessed by code expecting a nul terminator,
+ * and so rotatingbuffe[BUFFLEN] == 0 at all times.
+ */
+static char rotatingbuffer[BUFFLEN+1] ;
+
+static int rotatingbufferindex = 0 ;
+
+
+static char get_rotatingbuffer_char( int nidx )
+{
+    /* Takes a NEGATIVE index value and reads characters
+     * going back in the rotating buffer
+     */
+    
+    if( nidx > 0 )
+        return 0 ;
+    
+    if( nidx < BUFFLEN )
+        return 0 ;
+    
+    int j = rotatingbufferindex ;
+    
+    j += nidx ;
+    
+    if( j < 0 )
+        j += BUFFLEN ;
+    
+    return rotatingbuffer[j] ;
+}
+
+
+/*******************************************************
+ */
+
 int nextchar()
 {
     int retv = -1 ;
-
+    
+    int i = 0 ;
+    
     if( pendingchar != -1 )
     {
         retv = pendingchar ;
@@ -276,11 +426,48 @@ int nextchar()
     }
     else
     {
-        retv = fgetc( fin ) ;
-    }
+        retv = read_from_deferred_buffer() ;
+        
+        if( retv != -1 )
+            return retv ;
 
+        retv = fgetc( fin ) ;
+        
+        /* check if we're need to replace braces
+         */
+        if( ( ! in_quotes ) && ( ! in_comment ) && apply_brace_macros )
+        {
+            if( retv == (int)'{' )
+            {
+                append_to_deferredbuffer( open_brace_macro ) ;
+                
+                retv = read_from_deferred_buffer() ;
+            }
+            
+            if( retv == (int)'}' )
+            {
+                append_to_deferredbuffer( close_brace_macro ) ;
+                
+                retv = read_from_deferred_buffer() ;
+            }
+        }
+    }
+    
+    lastchar_read = currentchar_read ;
+    currentchar_read = retv ;
+    
+    if( ( ! in_quotes ) && ( ! in_comment ) )
+    {
+        rotatingbuffer[rotatingbufferindex] = retv ;
+        rotatingbufferindex++ ;
+        rotatingbufferindex %= BUFFLEN ;
+    }
+    
     return retv ;
 }
+
+/*******************************************************
+ */
 
 
 /* readchar(c) reads input characters until it finds a
@@ -315,6 +502,9 @@ int readchar( int cwanted )
 
     return retv ;
 }
+
+/*******************************************************
+ */
 
 
 #define issymbolchar(c)     ( ( (c) == '_' ) || isalnum((c)) )
@@ -451,9 +641,10 @@ int readsymbol()
     postbuff[k] = '\0' ;
 
     retv = c ;
-
+    
     lastchar = c ;
-
+    
+    /*
     if( c != (int)'\n' )
     {
         debugf( "readsymbol() ::     buff = [ %s ][ %s ][ %s ][ %c ]\n", prebuff, buff, postbuff, c ) ;
@@ -462,9 +653,13 @@ int readsymbol()
     {
         debugf( "readsymbol() ::     buff = [ %s ][ %s ][ %s ][ \\n ]\n", prebuff, buff, postbuff ) ;
     }
+    */
 
     return retv ;
 }
+
+/*******************************************************
+ */
 
 
 /* read everything up to the EOL into the buffer
@@ -494,6 +689,9 @@ int read_to_eol()
 
     return retv ;
 }
+
+/*******************************************************
+ */
 
 /* this function pushes a copy of a buffer onto the stack
  *
@@ -534,6 +732,9 @@ void stackcopybuffer( char *buffer, int checklen )
     memcpy( node->buff, buffer, len ) ;
 }
 
+/*******************************************************
+ */
+
 
 #define stackcopy() stackcopybuffer(buff,1)
 
@@ -543,6 +744,9 @@ void stackcopybuffer( char *buffer, int checklen )
                 stackcopybuffer(buff,0) ; \
                 stackcopybuffer(postbuff,0) ; \
             }
+
+/*******************************************************
+ */
 
 
 /* get a pointer to the buffer stored in the node
@@ -583,6 +787,9 @@ char *stackbuffat( int index )
     return retp ;
 }
 
+/*******************************************************
+ */
+
 
 /* pop the tos, freeing all memory for that node
  */
@@ -600,6 +807,9 @@ void stackpop()
 
     wordstackp = next ;
 }
+
+/*******************************************************
+ */
 
 
 /* release all memory used by the stack
@@ -620,6 +830,9 @@ void stackfree()
 
     wordstackp = NULL ;
 }
+
+/*******************************************************
+ */
 
 
 /* check if the stack contains the currently buffered symbol
@@ -647,6 +860,9 @@ int symbolonstack()
     return retv ;
 }
 
+/*******************************************************
+ */
+
 
 int process_macrochar()
 {
@@ -656,6 +872,79 @@ int process_macrochar()
     
     return retv ;
 }
+
+/*******************************************************
+ */
+
+
+int process_simple_macro_def( char **macro )
+{
+    int retv = 0 ;
+
+    safe_free( *macro ) ;
+    
+    int i = 0 ;
+    
+    i = read_to_eol() ;
+    
+    i = strlen( buff ) ;
+    
+    *macro = (char *)malloc( i+1 ) ;
+    
+    if( *macro == NULL )
+    {
+        /* could not get memory
+         */
+    
+        return -1 ;
+    }
+    
+    memcpy( *macro, buff, i+1 ) ;
+    
+    return retv ;
+}
+
+/*******************************************************
+ */
+
+
+int process_def_open_brace()
+{
+    int retv = 0 ;
+    
+    retv = process_simple_macro_def( &open_brace_macro ) ;
+    
+    return retv ;
+}
+
+/*******************************************************
+ */
+
+
+int process_def_close_brace()
+{
+    int retv = 0 ;
+    
+    retv = process_simple_macro_def( &close_brace_macro ) ;
+    
+    return retv ;
+}
+
+/*******************************************************
+ */
+
+
+int process_def_return_macro()
+{
+    int retv = 0 ;
+    
+    retv = process_simple_macro_def( &return_macro ) ;
+    
+    return retv ;
+}
+
+/*******************************************************
+ */
 
 
 int process_quote()
@@ -733,6 +1022,9 @@ int process_quote()
     return retv ;
 }
 
+/*******************************************************
+ */
+
 
 /* treat everything until the next line starting with '#' as a
  * comment.
@@ -745,7 +1037,7 @@ int process_comment()
     int c = 0 ;
 
     fprintf( fout, "\n/*\n * " ) ;
-
+    
     c = nextchar() ;
 
     while( ( c != -1 ) && !feof(fin) )
@@ -791,6 +1083,9 @@ int process_comment()
     return retv ;
 }
 
+/*******************************************************
+ */
+
 
 static int ends_in_continuation()
 {
@@ -811,6 +1106,9 @@ static int ends_in_continuation()
     return 0 ;
 }
 
+/*******************************************************
+ */
+
 
 /* process a redefine
  *
@@ -825,11 +1123,6 @@ int process_redefine()
     int c = 0 ;
     int newc = 0 ;
 
-    /* first we need to read the definition part
-     * which should be of the form <macroname>([<parametername>{,<parametername>}])
-     *
-     */
-
     c = readsymbol() ;
 
     fprintf( fout, "#undef %s%s%s\n", prebuff, buff, postbuff ) ;
@@ -842,17 +1135,20 @@ int process_redefine()
     
     while( ends_in_continuation() )
     {
-        fputs( buff, fout ) ;
-        fputc( (int)'\n', fout ) ;
+        FPUTS( buff ) ;
+        FPUT( '\n' ) ;
     
         i = read_to_eol() ;
     };
     
-    fputs( buff, fout ) ;
-    fputc( (int)'\n', fout ) ;
+    FPUTS( buff ) ;
+    FPUT( '\n' ) ;
     
     return retv ;
 }
+
+/*******************************************************
+ */
 
 
 /* process a macro definition
@@ -935,17 +1231,15 @@ int process_def()
 
             if( symbolonstack() )
             {
-                fputs( prebuff, fout ) ;
+                FPUTS( prebuff ) ;
                 FPUT( '(' ) ;
-                fputs( buff, fout ) ;
+                FPUTS( buff ) ;
                 FPUT( ')' ) ;
-                fputs( postbuff, fout ) ;
+                FPUTS( postbuff ) ;
             }
             else
             {
-                fputs( prebuff, fout ) ;
-                fputs( buff, fout ) ;
-                fputs( postbuff, fout ) ;
+                OUTPUTBUFFS_NOLASTCHAR() ;
             }
 
             newc = readsymbol() ;
@@ -989,6 +1283,9 @@ int process_def()
 
     return retv ;
 }
+
+/*******************************************************
+ */
 
 
 /* output a set of constants with the given pre- and post- identifiers
@@ -1096,6 +1393,9 @@ int process_constants( int type )
     return retv ;
 }
 
+
+/*******************************************************
+ */
 
 
 /* Send a command to the shell to process the following
@@ -1263,6 +1563,9 @@ write_error:
 }
 
 
+/*******************************************************
+ */
+
 
 /* process checks the keyword we read in and if it finds a valid
  * word it does our extension processing
@@ -1270,6 +1573,30 @@ write_error:
  * This returns 0 if a keyword was found and processed and
  * -1 if processing failed or no keyword was found.
  */
+
+#define process_keyword( _kw, _proc ) \
+    \
+    if( iskeyword( #_kw ) ) \
+    { \
+        changes_made = TRUE ; \
+        \
+        retv = process_ ## _proc ; \
+        \
+        return retv ; \
+    }
+
+#define flag_keyword( _kw, _flag, _value ) \
+    \
+    if( iskeyword( #_kw ) ) \
+    { \
+        (_flag) = (_value) ; \
+        \
+        changes_made = TRUE ; \
+        \
+        return 0 ; \
+    }
+    
+
 int process()
 {
     int retv = -1 ;
@@ -1281,14 +1608,7 @@ int process()
     /* debugf( "buff = [%s]\n", buff ) ;
      */
     
-    if( iskeyword("skipoff" ) )
-    {
-        skip_is_on = FALSE ;
-
-        changes_made = TRUE ;
-
-        return 0 ;
-    }
+    flag_keyword( skipoff, skip_is_on, FALSE ) ;
     
     /* NOTE :
      *
@@ -1304,40 +1624,10 @@ int process()
         return -1 ;
     }
 
-    if( iskeyword("skipon") )
-    {
-        skip_is_on = TRUE ;
-
-        changes_made = TRUE ;
-
-        return 0 ;
-    }
-
-    if( iskeyword("macrochar") )
-    {
-        changes_made = TRUE ;
-        
-        retv = process_macrochar() ;
-        
-        return retv ;
-    }
-
-
-#ifdef DEBUGVER
-    if( iskeyword("testextension") )
-    {
-        /* a test extension
-         */
-
-        fprintf( fout, "\n/* Preprocessor extension found in code\n */\n\n" ) ;
-
-        changes_made = TRUE ;
-
-        return 0 ;
-    }
-#endif /* DEBUGVER */
-
-
+    flag_keyword( skipon, skip_is_on, TRUE ) ;
+    
+    process_keyword( macrochar, macrochar() ) ;
+    
     if( iskeyword("debugon") )
     {
         /* turn on debug reporting from caps
@@ -1348,7 +1638,6 @@ int process()
 
         return 0 ;
     }
-
 
     if( iskeyword("debugoff") )
     {
@@ -1361,101 +1650,57 @@ int process()
         return 0 ;
     }
 
+    process_keyword( quote, quote() ) ;
 
-    if( iskeyword("quote") )
-    {
-        retv = process_quote() ;
+    process_keyword( comment, comment() ) ;
 
-        changes_made = TRUE ;
-
-        return retv ;
-    }
-
-
-    if( iskeyword("comment") )
-    {
-        retv = process_comment() ;
-
-        changes_made = TRUE ;
-
-        return retv ;
-    }
-
-    if( iskeyword("def") )
-    {
-        retv = process_def() ;
-
-        changes_made = TRUE ;
-
-        return retv ;
-    }
-
-
-    if( iskeyword("constants") )
-    {
-        retv = process_constants(0) ;
-
-        changes_made = TRUE ;
-
-        return retv ;
-    }
-
-
-    if( iskeyword("flags") )
-    {
-        retv = process_constants(1) ;
-
-        changes_made = TRUE ;
-
-        return retv ;
-    }
-
-
-    if( iskeyword("constants-values") )
-    {
-        retv = process_constants(2) ;
-
-        changes_made = TRUE ;
-
-        return retv ;
-    }
-
-
-    if( iskeyword("constants-negative") )
-    {
-        retv = process_constants(3) ;
-
-        changes_made = TRUE ;
-
-        return retv ;
-    }
-
-
-    if( iskeyword("command") )
-    {
-        retv = process_command() ;
-
-        changes_made = TRUE ;
-
-        return retv ;
-    }
+    process_keyword( def, def() ) ;
     
-    if( iskeyword("redefine") )
-    {
-        retv = process_redefine() ;
+    process_keyword( constants, constants(0) ) ;
 
-        changes_made = TRUE ;
+    process_keyword( flags, constants(1) ) ;
 
-        return retv ;
-    }
+    process_keyword( constants-values, constants(2) ) ;
+
+    process_keyword( constants-negative, constants(3) ) ;
+
+    process_keyword( command, command() ) ;
+    
+    process_keyword( redefine, redefine() ) ;
+
+    flag_keyword( brace_macros_on, apply_brace_macros, TRUE ) ;    
+    
+    flag_keyword( brace_macros_off, apply_brace_macros, FALSE ) ;    
+    
+    process_keyword( def_open_brace, def_open_brace() ) ;
+    
+    process_keyword( def_close_brace, def_close_brace() ) ;
+    
+    flag_keyword( return_macro_on, apply_return_macro, TRUE ) ;
+    
+    flag_keyword( return_macro_off, apply_return_macro, FALSE ) ;
+    
+    process_keyword( def_return_macro, def_return_macro() ) ;
     
     return retv ;
 }
 
 
-
+/*******************************************************************
+ *
+ * main_process() processes each individual file passed to cap
+ *
+ * There is no cross-file communication.  Each file starts with a
+ * clean state in cap.
+ *
+ */
 int main_process()
 {
+    if( fin == NULL )
+    {
+        return 0 ;
+    }
+    
     int retv = 0 ;
     int c = 0 ;
     int i = 0 ;
@@ -1468,11 +1713,41 @@ int main_process()
      * character, not just a space.  So we have to record blank chars
      */
     char blankchars[BUFFLEN] ;
-            
-    if( fin == NULL )
-    {
-        return 0 ;
-    }
+    
+    /* Initialize the state variables for a new file
+     */
+    
+    apply_brace_macros = FALSE ;
+    
+    deferredbufferindex = -1 ;
+    deferredbuffer[0] = 0 ;
+    
+    escape_pending = FALSE ;
+    
+    in_comment = FALSE ;
+    in_quotes = FALSE ;
+    
+    lastchar_read = -1 ;
+    currentchar_read = -1 ;
+    
+    buff[0] = 0 ;
+    
+    rotatingbufferindex = 0 ;
+    memset( rotatingbuffer, 0, BUFFLEN+1 ) ;
+    
+    macrochar = initial_macrochar ;
+    
+    pendingchar = -1 ;
+    
+    postbuff[0] = 0 ;
+    prebuff[0] = 0 ;
+    
+    quote_pending = FALSE ;
+    
+    skip_is_on = FALSE ;
+
+    /* Now process the file ... 
+     */
 
     while( ( c != -1 ) && ( !feof(fin) ) )
     {
@@ -1480,12 +1755,12 @@ int main_process()
         
         if( c == -1 )
             break ;
-
+        
         if( c != (int)macrochar )
         {
             /* not a macrochar ( normally hash ) as first char on line
              * then output everything until we
-             * we reach EOL or EOF
+             * we reach EOL or EOF with special handling.
              */
 
             FPUT(c) ;
@@ -1497,7 +1772,158 @@ int main_process()
                 if( c == -1 )
                     break ;
 
-                FPUT(c) ;
+                if( ( c == '*' ) && ( lastchar_read == '/' ) )
+                {
+                    /* a C comment
+                     * read everything and output it unchanged until EOF
+                     * or we detect the end of comment pair of chars
+                     */
+                    
+                    in_comment = TRUE ;
+                    
+                    FPUT(c) ;
+                    
+                    while( ( c != -1 ) && ( !feof(fin) ) )
+                    {
+                        if( ( c == '/' ) && ( lastchar_read == '*' ) )
+                        {
+                            /* end of comment
+                             */
+                            
+                            break ;
+                        }
+                        
+                        c = nextchar() ;
+                        
+                        FPUT(c) ;
+                    };
+                    
+                    in_comment = FALSE ;
+                }
+                else if( ( ( c == '"' ) && ( lastchar != '\\' ) ) && ! in_quotes )
+                {
+                    /* a double quotes character starting something in quotes
+                     */
+                    
+                    in_quotes = TRUE ;
+                    
+                    /* We treat this like a comment
+                     *
+                     * In C either the string literal must end on the same
+                     * line with a matching quotation OR it must use
+                     * continuation marks at the end of the line
+                     */
+                    
+                    FPUT(c) ;
+                    
+                    c = nextchar() ;
+                    
+                    FPUT(c) ;
+                    
+                    while( ( c != -1 ) && ( !feof(fin) ) )
+                    {
+                        if( ( c == '"' ) && ( lastchar != '\\' ) )
+                        {
+                            /* end quotation mark
+                             */
+                            
+                            break ;
+                        }
+                        else if( ( c == '\n' ) && ( lastchar != '\\' ) )
+                        {
+                            /* That's a syntax error in C - an open quoted string literal
+                             * which has not closed by line end but the line has no
+                             * continuation mark
+                             *
+                             * return -1 for an error
+                             */
+                            
+                            return -1 ;
+                        }
+                        
+                        c = nextchar() ;
+                        
+                        FPUT(c) ;
+                    };
+                    
+                    in_quotes = FALSE ;
+                }
+                else if( apply_return_macro && ( c == 'r' ) && ( ( lastchar_read == '\n' ) || iswhitespace(lastchar_read) ) )
+                {
+                    /* check for possible return statement
+                     *
+                     * we don't do this if we're not applting brace macros
+                     */
+                    
+                    char tempbuff[BUFFLEN] ;
+                    
+                    char *returnstr = "return" ;
+                    
+                    memset( tempbuff, 0, 8 ) ;
+                    
+                    int k = 0 ;
+                    
+                    while( ( c == returnstr[k] ) && ( k < 6 ) )
+                    {
+                        tempbuff[k] = returnstr[k] ;
+                        k++ ;
+                        
+                        c = nextchar() ;
+                    };
+                    
+                    tempbuff[k] = c ;
+                    tempbuff[k+1] = 0 ;
+                    
+                    if( ( k == 6 ) && ( iswhitespace(c) || ( c == ';' ) || ( c == '(' ) ) )
+                    {
+                        /* a match to a the C return keyword !
+                         *
+                         * with brace macros on we need to ensure that the
+                         * closing brace macro is placed before the return
+                         *
+                         * There are three forms :
+                         *    return ;
+                         *    return(...) ;
+                         *    return x ;
+                         */
+                        
+                        FPUT( '{' ) ;
+                        
+                        FPUTS( return_macro ) ;
+                        
+                        if( c == ';' )
+                        {
+                            FPUTS( tempbuff ) ;
+                        }
+                        else
+                        {
+                            FPUTS( tempbuff ) ;
+                            
+                            c = nextchar() ;
+                            
+                            while( ( c != -1 ) && ( c != ';' ) && ( !feof(fin) ) )
+                            {
+                                FPUT( c ) ;
+                                c = nextchar() ;
+                            };
+                            
+                            FPUT( c ) ;
+                        }
+                        
+                        FPUT( '}' ) ;
+                    }
+                    else
+                    {
+                        /* Not a match - just output what we have
+                         */
+                        
+                        FPUTS( tempbuff ) ;
+                    }
+                }
+                else
+                {
+                    FPUT(c) ;
+                }
             };
 
             if( c == -1 )
@@ -1621,10 +2047,13 @@ int main_process()
     return 0 ;
 }
 
+/*******************************************************
+ */
+
 
 static void version()
 {
-    char ver[128] = "$Revision: 1.60 $" ;
+    char ver[128] = "$Revision: 1.96 $" ;
     
     /* Skip the RCS string preceeding the version number
      */
@@ -1638,6 +2067,9 @@ static void version()
     
     printf( "CAP - C Auxilary Preprocessor - version %s\n", ver+11 ) ;
 }
+
+/*******************************************************
+ */
 
 
 static int init_main( int argc, char **argv )
@@ -1688,7 +2120,7 @@ static int init_main( int argc, char **argv )
                 return -1 ;
             }
             
-            macrochar = *( argv[i] ) ;
+            initial_macrochar = *( argv[i] ) ;
             
             i++ ;
             
@@ -1767,6 +2199,9 @@ static int init_main( int argc, char **argv )
     return retv ;
 }
 
+/*******************************************************
+ */
+
 static int deinit_main()
 {
     int retv = 0 ;
@@ -1785,10 +2220,16 @@ static int deinit_main()
     {
         FCLOSE( fout ) ;
     }
+    
+    safe_free( open_brace_macro ) ;
+    safe_free( close_brace_macro ) ;
 
     return retv ;
 }
 
+
+/*******************************************************
+ */
 
 int main( int argc, char **argv )
 {
@@ -1810,4 +2251,7 @@ fini_error:
     return retv ;
 }
 
+
+/*******************************************************
+ */
 
