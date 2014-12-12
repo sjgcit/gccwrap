@@ -4,7 +4,7 @@
  * LD_PRELOAD to be used to redirect the input to gcc
  * for some files.
  *
- * $Id: wrap_open.c,v 1.75 2014/12/07 08:02:23 sjg Exp $
+ * $Id: wrap_open.c,v 1.78 2014/12/12 06:14:36 sjg Exp $
  *
  * (c) Stephen Geary, Dec 2014
  */
@@ -37,7 +37,7 @@
 /**********************************************************************
  */
 
-#define DEBUGME
+// #define DEBUGME
 
 #include "debugme.h"
 
@@ -795,6 +795,46 @@ void __attribute__ ((constructor)) my_init()
 /**********************************************************************
  */
 
+#ifndef DEBUGME
+#  define dumpfile(fn)
+#else
+
+static void dumpfile( char *fn )
+{
+    if( supress_redirection == FALSE )
+        return ;
+
+    FILE *fin = NULL ;
+    
+    fin = fopen( fn, "r" ) ;
+    
+    if( fn == NULL )
+        return ;
+    
+    SJGF( "\nFILEDUMP :: %s\n", fn ) ;
+    
+    int c = 0;
+    
+    c = fgetc( fin ) ;
+    
+    while( ( c != -1 ) && !feof(fin) )
+    {
+        fputc( c, stderr ) ;
+    
+        c = fgetc( fin ) ;
+    };
+    
+    fclose( fin ) ;
+    
+    SJGF( "\nFILEDUMP-ENDS\n" ) ;
+}
+
+#endif
+
+/**********************************************************************
+ */
+
+
 void __attribute__ ((destructor)) my_fini()
 {
     SJGF( "In my_fini()" ) ;
@@ -819,6 +859,8 @@ void __attribute__ ((destructor)) my_fini()
                     
                     if( curr->tempfilename[0] != 0 )
                     {
+                        dumpfile( curr->tempfilename ) ;
+                        
                         retv = remove( curr->tempfilename ) ;
                         
                         SJGF( "remove( %s ) = %s", curr->tempfilename ,curr->realpath ) ;
@@ -1249,5 +1291,6 @@ int close( int fd )
     
     return retv ;
 }
+
 
 

@@ -2,7 +2,7 @@
 /*
  * C Auxilary Preprocessor
  *
- * $Id: cap.c,v 1.96 2014/12/11 09:33:11 sjg Exp $
+ * $Id: cap.c,v 1.100 2014/12/12 06:19:53 sjg Exp $
  *
  * (c) Stephen Geary, Jan 2011
  *
@@ -39,10 +39,10 @@
 #include <errno.h>
 
 
-static char *cap_version = "$Revision: 1.96 $" ;
+static char *cap_version = "$Revision: 1.100 $" ;
 
 
-#define DEBUGVER
+// #define DEBUGVER
 
 
 
@@ -54,6 +54,7 @@ static char *cap_version = "$Revision: 1.96 $" ;
 #  define debug_on()    { debugme = 1 ; }
 #  define debug_off()   { debugme = 0 ; }
 #else
+#  define DBGLINE()
 #  define debugf(...)
 #  define debug_on()
 #  define debug_off()
@@ -161,6 +162,7 @@ static int lastchar = -1 ;
 
 #define iswhitespace(c)     ( ( (c) == ' ' ) || ( (c) == '\t' ) )
 
+#define istrueeol()         ( ( currentchar_read == '\n' ) && ( lastchar_read != '\\' ) )
 
 /*******************************************************
  */
@@ -1582,6 +1584,8 @@ write_error:
         \
         retv = process_ ## _proc ; \
         \
+        debugf( "Accepted keyword :: " #_kw "\n" ) ; \
+        \
         return retv ; \
     }
 
@@ -1592,6 +1596,8 @@ write_error:
         (_flag) = (_value) ; \
         \
         changes_made = TRUE ; \
+        \
+        debugf( "Accepted flag:: " #_kw "\n" ) ; \
         \
         return 0 ; \
     }
@@ -1605,8 +1611,7 @@ int process()
      */
     buff[BUFFLEN] = '\0' ;
 
-    /* debugf( "buff = [%s]\n", buff ) ;
-     */
+    debugf( "buff = [%s]\n", buff ) ;
     
     flag_keyword( skipoff, skip_is_on, FALSE ) ;
     
@@ -1751,6 +1756,8 @@ int main_process()
 
     while( ( c != -1 ) && ( !feof(fin) ) )
     {
+        DBGLINE() ;
+        
         c = nextchar() ;
         
         if( c == -1 )
@@ -1762,7 +1769,9 @@ int main_process()
              * then output everything until we
              * we reach EOL or EOF with special handling.
              */
-
+            
+            DBGLINE() ;
+            
             FPUT(c) ;
 
             while( ( c != '\n' ) && ( c != -1 ) && ( !feof(fin) ) )
@@ -1774,6 +1783,8 @@ int main_process()
 
                 if( ( c == '*' ) && ( lastchar_read == '/' ) )
                 {
+                    DBGLINE() ;
+                
                     /* a C comment
                      * read everything and output it unchanged until EOF
                      * or we detect the end of comment pair of chars
@@ -1802,6 +1813,8 @@ int main_process()
                 }
                 else if( ( ( c == '"' ) && ( lastchar != '\\' ) ) && ! in_quotes )
                 {
+                    DBGLINE() ;
+                
                     /* a double quotes character starting something in quotes
                      */
                     
@@ -1813,7 +1826,7 @@ int main_process()
                      * line with a matching quotation OR it must use
                      * continuation marks at the end of the line
                      */
-                    
+                     
                     FPUT(c) ;
                     
                     c = nextchar() ;
@@ -1827,9 +1840,11 @@ int main_process()
                             /* end quotation mark
                              */
                             
+                            DBGLINE() ;
+                            
                             break ;
                         }
-                        else if( ( c == '\n' ) && ( lastchar != '\\' ) )
+                        else if( istrueeol() )
                         {
                             /* That's a syntax error in C - an open quoted string literal
                              * which has not closed by line end but the line has no
@@ -1837,6 +1852,8 @@ int main_process()
                              *
                              * return -1 for an error
                              */
+                            
+                            DBGLINE() ;
                             
                             return -1 ;
                         }
@@ -1847,9 +1864,18 @@ int main_process()
                     };
                     
                     in_quotes = FALSE ;
+                    
+                    if( c == -1 )
+                    {
+                        debugf( "c was -1\n" ) ;
+                    }
+                    
+                    DBGLINE() ;
                 }
                 else if( apply_return_macro && ( c == 'r' ) && ( ( lastchar_read == '\n' ) || iswhitespace(lastchar_read) ) )
                 {
+                    DBGLINE() ;
+                
                     /* check for possible return statement
                      *
                      * we don't do this if we're not applting brace macros
@@ -1961,6 +1987,8 @@ int main_process()
                 
                 c = nextchar() ;
             };
+            
+            blankchars[ leadingspaces ] = 0 ;
 
             while( ( i < BUFFLEN ) && ( c != -1 ) && ( !isspace((char)c) ) )
             {
@@ -1971,20 +1999,20 @@ int main_process()
             };
 
             buff[i] = '\0' ;
-
+            
+            debugf( "buff = %s\n", buff ) ;
+            
             if( ( i == BUFFLEN ) || ( c == -1 ) )
             {
                 /* ran out of room in buffer or EOF
                  * so we can treat that as not being a keyword
                  */
-                 
+                
+                DBGLINE() ;
+                
                 FPUT( macrochar ) ;
                 
-                for( j = 0 ; j < leadingspaces ; j++ )
-                {
-                    FPUT( blankchars[j] ) ;
-                }
-                
+                FPUTS( blankchars ) ;
                 leadingspaces = 0 ;
 
                 j = 1 ;
@@ -1999,6 +2027,8 @@ int main_process()
                 {
                     FPUT( c ) ;
                 }
+                
+                DBGLINE() ;
             }
             else
             {
@@ -2007,21 +2037,21 @@ int main_process()
                  * in either case we check for a keyword and we output it as given
                  * if no keyword is found.
                  */
-
+                
+                DBGLINE() ;
+                
                 retv = process() ;
 
                 if( retv != 0 )
                 {
+                    DBGLINE() ;
+                
                     /* ouput the buffer if we did not recognize the word
                      */
 
                     FPUT( macrochar ) ;
-            
-                    for( j = 0 ; j < leadingspaces ; j++ )
-                    {
-                        FPUT( blankchars[j] ) ;
-                    }
-                
+                    
+                    FPUTS( blankchars ) ;
                     leadingspaces = 0 ;
 
                     j = 1 ;
@@ -2031,6 +2061,25 @@ int main_process()
                         FPUT( buff[j] ) ;
                         j++ ;
                     };
+                    
+                    /* .. and finally the last character read !
+                     */
+                    
+                    FPUT( c ) ;
+                    
+                    /* Now write out everything until EOL without continuation mark
+                     */
+                    
+                    c = nextchar() ;
+                    
+                    while( ( c != -1 ) && ( !feof(fin) ) && ! istrueeol() )
+                    {
+                        FPUT( c ) ;
+                        
+                        c = nextchar() ;
+                    };
+                    
+                    FPUT( c ) ;
                 }
 
                 if( isspace(c) )
@@ -2053,7 +2102,7 @@ int main_process()
 
 static void version()
 {
-    char ver[128] = "$Revision: 1.96 $" ;
+    char ver[128] = "$Revision: 1.100 $" ;
     
     /* Skip the RCS string preceeding the version number
      */
@@ -2254,4 +2303,5 @@ fini_error:
 
 /*******************************************************
  */
+
 

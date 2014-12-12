@@ -2,7 +2,7 @@
  * Test laucher to execvp() and allow automatic
  * setting of LD_PRELOAD=<launcherdir>/wrap_open.so 
  *
- * $Id: gccwrap.c,v 1.5 2014/12/06 10:38:16 sjg Exp $
+ * $Id: gccwrap.c,v 1.7 2014/12/12 06:17:29 sjg Exp $
  *
  * (c) 
  */
@@ -28,9 +28,11 @@ int main( int argc, char **argv )
     
     char *p = NULL ;
     
+    TURN_ON_DEBUG() ;
+    
     if( argc < 2 )
     {
-        fprintf( stderr, "Not enough arguments\n\nFormat is wrap_open <command> <command-args>\n\n" ) ;
+        errorf( "Not enough arguments\n\nFormat is %s <command-list> <compiler-args>\n\n", argv[0] ) ;
         
         fflush( stderr ) ;
     
@@ -39,41 +41,97 @@ int main( int argc, char **argv )
     
     char path[PATH_MAX] ;
     
-    char *q = *argv ;
+    char *q = NULL ;
     
-    p = path ;
-    
-    while( *q != 0 )
+    if( argv[0][0] != '/' )
     {
-        *p = *q ;
-        p++ ;
-        q++ ;
-    };
-    
-    while( ( p != path ) && ( *p != '/' ) )
-    {
-        p-- ;
-    };
-    
-    if( p == path )
-    {
-        *p++ = '.' ;
-        *p++ = '/' ;
+        /* Not a proper path so need to find wrap_open.so
+         * somewhere on PATH
+         */
+        
+        SJGF( "Trying PATH search...( %s )\n", *argv ) ;
+        
+        q = getenv( "PATH" ) ;
+        
+        SJGF( "PATH = %s\n", q ) ;
+        
+        if( q == NULL )
+        {
+            errorf( "Cannot locate wrap_open.so\n" ) ;
+            
+            return -1 ;
+        }
+        
+        while( *q != 0 )
+        {
+            p = path ;
+            
+            while( *q != ':' )
+            {
+                *p++ = *q++ ;
+            };
+            
+            if( *p != '/' )
+                *p++ = '/' ;
+            
+            strcpy( p, "wrap_open.so" ) ;
+            
+            SJGF( "Trying path = [%s]\n", path ) ;
+            
+            if( access( path, F_OK ) == 0 )
+            {
+                SJGF( "Found wrap_open.so ..." ) ;
+                
+                break ;
+            }
+            
+            q++ ;
+        };
     }
     else
     {
-        p++ ;
+        /* presumably a proper path so just use it
+         */
+        
+        SJGF( "Using path from %s ...", argv[0] ) ;
+        
+        q = *argv ;
+        
+        p = path ;
+        
+        while( *q != 0 )
+        {
+            *p = *q ;
+            p++ ;
+            q++ ;
+        };
+        
+        while( ( p != path ) && ( *p != '/' ) )
+        {
+            p-- ;
+        };
+        
+        if( p == path )
+        {
+            *p++ = '.' ;
+            *p++ = '/' ;
+        }
+        else
+        {
+            p++ ;
+        }
+        
+        strcpy( p, "wrap_open.so" ) ;
     }
     
-    strcpy( p, "wrap_open.so" ) ;
     
-    SJGF( stderr, "path = %s\n", path ) ;
+    SJGF( "path = %s\n", path ) ;
     
     retv = setenv( "LD_PRELOAD", path, 1 ) ;
     
     if( retv != 0 )
     {
-        fprintf( stderr, "Could not set LD_PRELOAD.\n" ) ;
+        errorf( "Could not set LD_PRELOAD.\n" ) ;
     
         return -1 ;
     }
@@ -82,7 +140,7 @@ int main( int argc, char **argv )
     
     if( retv != 0 )
     {
-        fprintf( stderr, "Could not set WRAP_OPEN_COMMAND.\n" ) ;
+        errorf( "Could not set WRAP_OPEN_COMMAND.\n" ) ;
     
         return -1 ;
     }
@@ -100,9 +158,10 @@ int main( int argc, char **argv )
     
     retv = execvp( argv[1], argv+1 ) ;
     
-    fprintf( stderr, "Could not execvp( %s ... )\n", argv[1] ) ;
+    errorf( "Could not execvp( %s ... )\n", argv[1] ) ;
     
     return retv ;
 }
+
 
 
